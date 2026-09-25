@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>本地网络访问（LNA）· WebSocket 连通性测试</title>
+<style>
+  body {
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    max-width: 720px;
+    margin: 40px auto;
+    padding: 0 20px;
+    color: #222;
+    line-height: 1.6;
+  }
+  h1 { font-size: 20px; }
+  .origin {
+    background: #f5f5f5;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-family: monospace;
+    font-size: 13px;
+    word-break: break-all;
+  }
+  .status {
+    font-size: 16px;
+    font-weight: 600;
+    padding: 12px 16px;
+    border-radius: 8px;
+    margin: 16px 0;
+  }
+  .status.waiting { background: #fff8e1; color: #8a6d00; }
+  .status.connecting { background: #e3f2fd; color: #0d47a1; }
+  .status.open { background: #e8f5e9; color: #1b5e20; }
+  .status.blocked { background: #ffebee; color: #b71c1c; }
+  .status.closed { background: #eeeeee; color: #444; }
+  button {
+    font-size: 14px;
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: 1px solid #ccc;
+    background: #fff;
+    cursor: pointer;
+  }
+  button:hover { background: #f0f0f0; }
+  #log {
+    margin-top: 16px;
+    background: #111;
+    color: #ddd;
+    font-family: monospace;
+    font-size: 12.5px;
+    padding: 12px;
+    border-radius: 8px;
+    max-height: 320px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  .hint {
+    font-size: 13px;
+    color: #666;
+    margin-top: 20px;
+  }
+</style>
+</head>
+<body>
+
+<h1>本地网络访问（LNA）· WebSocket 连通性测试</h1>
+<p>这个页面只做一件事：从当前源尝试连接本机 <code>ws://127.0.0.1:47821</code>，
+用来判断浏览器会不会因为「公网源连本地地址」而弹出授权提示或直接拦截连接。
+跟轻梭项目本身无关，不发送、不接收任何真实数据。</p>
+
+<p><strong>当前页面源：</strong></p>
+<div class="origin" id="origin"></div>
+
+<div class="status waiting" id="status">尚未开始</div>
+
+<button id="btn">开始连接测试</button>
+
+<div id="log"></div>
+
+<p class="hint">
+测试前请确认本机 127.0.0.1:47821 上确实有东西在监听（比如跑起来的 qingsuo-shell 或独立启动的 CaptureProto 桥接服务）——
+否则即使浏览器放行了连接尝试，也会看到"连接被拒绝"，那是端口没监听导致的，跟本次要测的 LNA 拦截是两回事，日志里会分开说明。
+</p>
+
+<script>
+const originEl = document.getElementById('origin');
+const statusEl = document.getElementById('status');
+const btn = document.getElementById('btn');
+const logEl = document.getElementById('log');
+
+originEl.textContent = location.origin + '  (protocol: ' + location.protocol + ')';
+
+function log(line) {
+  const t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  logEl.textContent += `[${t}] ${line}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(cls, text) {
+  statusEl.className = 'status ' + cls;
+  statusEl.textContent = text;
+}
+
+async function checkPermissionApi() {
+  // 部分 Chromium 版本支持通过 Permissions API 查询 local-network-access 状态，
+  // 查不到不代表没有这个限制，只是这个版本/场景没暴露查询接口。
+  try {
+    if (navigator.permissions && navigator.permissions.query) {
+      const status = await navigator.permissions.query({ name: 'local-network-access' });
+      log(`Permissions API 查询 local-network-access：${status.state}`);
+    } else {
+      log('当前浏览器不支持用 Permissions API 查询 local-network-access（不代表没有限制，只是查不到）');
+    }
+  } catch (e) {
+    log(`Permissions API 查询失败或不支持该权限名：${e.message}`);
+  }
+}
+
+function runTest() {
+  btn.disabled = true;
+  setStatus('connecting', '正在尝试连接 ws://127.0.0.1:47821 ...');
+  log('开始测试');
+  log(`当前源：${location.origin}`);
+
+  if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+    log('⚠️ 当前不是 HTTPS 源，也不是 localhost/127.0.0.1 —— 部分安全限制只在 HTTPS 下生效，这次测试结果可能不完全代表真实情况');
+  }
+
+  checkPermissionApi();
+
+  let socket;
+  let settled = false;
+  const startedAt = performance.now();
+
+  const timeoutId = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    const elapsed = Math.round(performance.now() - startedAt);
+    setStatus('blocked', `⏱ 超时（${elapsed}ms）：既没有 onopen 也没有 onerror/onclose 触发`);
+    log(`超时未有任何回调触发，耗时 ${elapsed}ms —— 这种"悬而不决"的表现，在实测中也可能对应授权提示正弹在屏幕上等待用户点击（比如浏览器地址栏旁边），请检查一下地址栏或屏幕角落有没有弹出的权限请求`);
+    try { socket && socket.close(); } catch (e) {}
+    btn.disabled = false;
+  }, 8000);
+
+  try {
+    socket = new WebSocket('ws://127.0.0.1:47821');
+  } catch (e) {
+    settled = true;
+    clearTimeout(timeoutId);
+    setStatus('blocked', '❌ new WebSocket() 同步抛出异常');
+    log(`同步异常：${e.message} —— 这种情况通常意味着浏览器在构造阶段就直接拒绝了，不会走到 onopen/onerror`);
+    btn.disabled = false;
+    return;
+  }
+
+  socket.onopen = () => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeoutId);
+    const elapsed = Math.round(performance.now() - startedAt);
+    setStatus('open', `✅ 连接成功（${elapsed}ms）—— 没有被 LNA 拦截`);
+    log(`onopen 触发，耗时 ${elapsed}ms。说明这个源到 127.0.0.1 的 WebSocket 连接没有被浏览器拦截（可能是浏览器版本尚未启用该限制、已经授权过、或者本身就不在同一地址空间限制范围内）`);
+    setTimeout(() => socket.close(), 500);
+  };
+
+  socket.onerror = () => {
+    log('onerror 触发（浏览器不会通过这个事件透露具体原因，是安全设计，不是bug）');
+  };
+
+  socket.onclose = (ev) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeoutId);
+    const elapsed = Math.round(performance.now() - startedAt);
+    log(`onclose 触发，code=${ev.code} wasClean=${ev.wasClean}，耗时 ${elapsed}ms`);
+    if (elapsed < 200) {
+      setStatus('blocked', `❌ 几乎立即关闭（${elapsed}ms）—— 很可能是被拦截，或端口无人监听`);
+      log('耗时极短通常有两种可能：① 端口没有监听（"连接被拒绝"），② 浏览器在建立前就直接拒绝了。仅凭这个日志无法百分百区分，建议同时检查本机 127.0.0.1:47821 是否真的有服务在跑');
+    } else {
+      setStatus('blocked', `⚠️ 连接被关闭（${elapsed}ms），未走到 onopen`);
+    }
+    btn.disabled = false;
+  };
+}
+
+btn.addEventListener('click', runTest);
+</script>
+
+</body>
+</html>
